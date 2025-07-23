@@ -1,4 +1,5 @@
 from math import sqrt
+import os
 from libs.ustr import ustr
 import hashlib
 import re
@@ -106,6 +107,20 @@ def natural_sort(list, key=lambda s:s):
         return lambda s: [convert(c) for c in re.split('([0-9]+)', key(s))]
     sort_key = get_alphanum_key_func(key)
     list.sort(key=sort_key)
+    
+    
+def sort_folder_list_by_timestamp(file_list):
+    """
+    Sort the folder list by the timestamp of the files in each folder.
+    """
+    print("Sorting folder list by timestamp...")
+    def get_timestamp(file):
+        try:
+            return os.path.getmtime(file)
+        except Exception:
+            print(f"Error getting timestamp for file: {file}")
+            return 0
+    file_list.sort(key=get_timestamp)
 
 
 # QT4 has a trimmed method, in QT5 this is called strip
