@@ -1,0 +1,8 @@
+car
+bus
+van
+truck
+motorbike
+lights
+pedestrian
+cyclist

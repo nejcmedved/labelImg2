@@ -6,7 +6,10 @@ import os.path
 import platform
 import shutil
 import sys
+import glob
 import webbrowser as wb
+import random
+from threading import Thread
 from functools import partial
 
 try:
@@ -23,6 +26,8 @@ except ImportError:
         sip.setapi('QVariant', 2)
     from PyQt4.QtGui import *
     from PyQt4.QtCore import *
+    
+import yaml
 
 from libs.combobox import ComboBox
 from libs.default_label_combobox import DefaultLabelComboBox
@@ -48,7 +53,12 @@ from libs.create_ml_io import JSON_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem
 
+import ultralytics
+
 __appname__ = 'labelImg'
+
+LOCAL_TRAIN_DIR = 'local_train'
+MODELS_DIR = 'models'
 
 
 class WindowMixin(object):
@@ -75,6 +85,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def __init__(self, default_filename=None, default_prefdef_class_file=None, default_save_dir=None):
         super(MainWindow, self).__init__()
+        
+        print("Starting %s..." % __appname__)
+        
         self.setWindowTitle(__appname__)
 
         # Load setting in the main thread
@@ -99,6 +112,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.last_open_dir = None
         self.cur_img_idx = 0
         self.img_count = len(self.m_img_list)
+        
+        self.available_models = glob.glob(f"{MODELS_DIR}/*.pt")
+        self.selected_model = self.available_models[0] if self.available_models else ""
 
         # Whether we need to save or not.
         self.dirty = False
@@ -164,10 +180,44 @@ class MainWindow(QMainWindow, WindowMixin):
         list_layout.addWidget(self.label_list)
 
 
-
         self.dock = QDockWidget(get_str('boxLabelText'), self)
         self.dock.setObjectName(get_str('labels'))
         self.dock.setWidget(label_list_container)
+        
+        self.detection_widget = QWidget()
+        
+        self.detection_widget_layout = QVBoxLayout()
+        self.detection_widget.setLayout(self.detection_widget_layout)
+        
+        self.annotation_treshold_input = QLineEdit()
+        self.annotation_treshold_input.setPlaceholderText('Annotation Treshold')
+        self.annotation_treshold_input.setText('0.5')
+        self.detection_widget_layout.addWidget(self.annotation_treshold_input)
+
+        self.annotate_button = QPushButton("Annotate till end")
+        self.annotate_button.clicked.connect(self.annotate_till_end)
+        self.detection_widget_layout.addWidget(self.annotate_button)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.detection_widget_layout.addWidget(self.progress_bar)
+
+        self.detection_panel = QDockWidget('Detection Panel', self)
+        self.detection_panel.setObjectName("Detection panel")
+        self.detection_panel.setWidget(self.detection_widget)
+        
+        self.train_button = QPushButton("Train currently annotated pictures")
+        self.train_button.clicked.connect(self.train_model)
+        self.detection_widget_layout.addWidget(self.train_button)
+        
+        def on_selection_changed(self, index):
+            self.selected_model = self.dropdown.currentText()
+
+        self.dropdown = QComboBox()
+        self.dropdown.addItems(self.available_models)
+        self.detection_widget_layout.addWidget(self.dropdown)
+        
 
         self.file_list_widget = QListWidget()
         self.file_list_widget.itemDoubleClicked.connect(self.file_item_double_clicked)
@@ -206,6 +256,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.detection_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock)
         self.file_dock.setFeatures(QDockWidget.DockWidgetFloatable)
 
@@ -538,6 +589,129 @@ class MainWindow(QMainWindow, WindowMixin):
         # Open Dir if default file
         if self.file_path and os.path.isdir(self.file_path):
             self.open_dir_dialog(dir_path=self.file_path, silent=True)
+            
+    def prepare_yolo_dataset(self, image_paths, class_names, split_ratio=0.8):
+        base_dir = LOCAL_TRAIN_DIR
+        random.shuffle(image_paths)
+
+        train_size = int(len(image_paths) * split_ratio)
+        train_files = image_paths[:train_size]
+        val_files = image_paths[train_size:]
+
+        # Create folders
+        for subset in ['train', 'val']:
+            os.makedirs(os.path.join(base_dir, subset), exist_ok=True)
+
+        def copy_split(files, subset):
+            for file in files:
+                img_fname = os.path.basename(file)
+                print(f"Copying {file} fname={img_fname} to {subset} set...")
+                file_dir = os.path.dirname(file)
+                name, _ = os.path.splitext(file)
+                fname = os.path.basename(name)
+                # Copy image
+                shutil.copy(file, os.path.join(base_dir, subset, img_fname))
+                # Copy label
+                txt_path = os.path.join(file_dir, name + '.txt')
+                if os.path.exists(txt_path):
+                    shutil.copy(txt_path, os.path.join(base_dir, subset, fname + '.txt'))
+
+        copy_split(train_files, 'train')
+        copy_split(val_files, 'val')
+
+        # Write data.yaml
+        data_yaml = {
+            'path': base_dir,
+            'train': 'train',
+            'val': 'val',
+            'nc': len(class_names),
+            'names': class_names
+        }
+
+        yaml_path = os.path.join(base_dir, 'local_train.yaml')
+        with open(yaml_path, 'w') as f:
+            yaml.dump(data_yaml, f)
+
+        return yaml_path
+    
+    def train_model(self):
+        # remove old local train dir if exists
+        if os.path.exists(LOCAL_TRAIN_DIR):
+            shutil.rmtree(LOCAL_TRAIN_DIR)
+        # currently annotated images
+        images = self.m_img_list[0:self.cur_img_idx]
+        print(f"Training model with {len(images)} images...")
+        if(len(images) == 0):
+            print("No images to train on. Please annotate some images first.")
+            return
+        self.prepare_yolo_dataset(images, self.label_hist)
+        if not self.selected_model:
+            print("No model selected for training.")
+            return
+        model = ultralytics.YOLO(self.selected_model)  # or "best.pt"
+        results = model.train(data=f"{LOCAL_TRAIN_DIR}/local_train.yaml", epochs=20, imgsz=640)
+        print(f"Training completed. Results: {results}")
+        # copy model to "models" dir
+        new_model_path = os.path.join(results.save_dir, "weights", "best.pt")
+        if not os.path.exists("models"):
+            os.makedirs("models")
+        shutil.copy(new_model_path, "models/latest.pt")
+        
+        # populate available models
+        self.available_models = glob.glob(f"{MODELS_DIR}/*.pt")
+        self.dropdown.clear()
+        self.dropdown.addItems(self.available_models)
+
+
+    def annotation_thread(self):
+        confidence: float = 0.5
+        num_images = len(self.m_img_list) - self.cur_img_idx
+        
+        try:
+            confidence = float(self.annotation_treshold_input.text())
+        except ValueError:
+            pass
+        model_path = self.selected_model
+        if not model_path:
+            print("No model selected for annotation.")
+            return
+        
+        model = ultralytics.YOLO(model_path)
+        
+        images_to_annotate = self.m_img_list[self.cur_img_idx:]
+        i = 0
+        for image_path in images_to_annotate:
+            results = model(image_path, conf=confidence, save=False)
+            result = results[0]
+
+            # Extract boxes and classes
+            boxes = result.boxes.xywhn.cpu().numpy()  # Normalized bbox: x_center, y_center, w, h
+            cls_ids = result.boxes.cls.cpu().numpy()  # Class IDs
+
+            # Format YOLO lines
+            yolo_lines = [
+                f"{int(cls)} {x:.6f} {y:.6f} {w:.6f} {h:.6f}"
+                for (x, y, w, h), cls in zip(boxes, cls_ids)
+            ]
+
+            # Save to same directory as image
+            img_dir = os.path.dirname(image_path)
+            img_stem = os.path.splitext(os.path.basename(image_path))[0]
+            txt_path = os.path.join(img_dir, img_stem + ".txt")
+
+            with open(txt_path, "w") as f:
+                f.write("\n".join(yolo_lines))
+
+            print(f"[✓] Saved annotations to: {txt_path}")
+            i += 1
+            self.progress_bar.setValue(int((i / num_images) * 100))
+
+            
+    def annotate_till_end(self):
+        print(f"Annotating till end... {self.img_count} images remaining current position {self.cur_img_idx}")
+        self.progress_bar.setValue(0)
+        # run annnotation in a separate thread
+        self.annotation_task = Thread(target=self.annotation_thread).start()
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_Control:
@@ -1290,8 +1464,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     relative_path = os.path.join(root, file)
                     path = ustr(os.path.abspath(relative_path))
                     images.append(path)
-        sort_folder_list_by_timestamp(images)
-        # natural_sort(images, key=lambda x: x.lower())
+        #sort_folder_list_by_timestamp(images)
+        natural_sort(images, key=lambda x: x.lower())
         return images
 
     def change_save_dir_dialog(self, _value=False):
@@ -1371,6 +1545,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.file_path = None
         self.file_list_widget.clear()
         self.m_img_list = self.scan_all_images(dir_path)
+        print('Found %d images in %s' % (len(self.m_img_list), dir_path))
         self.img_count = len(self.m_img_list)
         self.open_next_image()
         for imgPath in self.m_img_list:

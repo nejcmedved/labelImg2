@@ -41,4 +41,8 @@ __pycache__/
 .unison*
 .attach*
 tmp.*
-/annotate
+/avp_lj_collected_v1
+/*ann*
+/*train*
+/runs
+*.pt

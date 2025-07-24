@@ -34,9 +34,9 @@ class Shape(object):
     vertex_fill_color = DEFAULT_VERTEX_FILL_COLOR
     h_vertex_fill_color = DEFAULT_HVERTEX_FILL_COLOR
     point_type = P_ROUND
-    point_size = 16
+    point_size = 8
     scale = 1.0
-    label_font_size = 8
+    label_font_size = 4
 
     def __init__(self, label=None, line_color=None, difficult=False, paint_label=False):
         self.label = label
@@ -128,6 +128,8 @@ class Shape(object):
                         self.label = ""
                     if min_y < min_y_label:
                         min_y += min_y_label
+                    # disable opacity for text
+                    # painter.setOpacity(1.0)
                     painter.drawText(int(min_x), int(min_y), self.label)
 
             if self.fill:
